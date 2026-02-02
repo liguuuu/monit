@@ -58,7 +58,7 @@
     >
       <div 
         v-for="(warning, index) in warningList" 
-        :key="warning.id || index"
+        :key="'group1-'+ (warning.id || index)"
         class="warning-item"
       >
         <div class="warning-content">
@@ -69,6 +69,17 @@
             :class="['handle-btn', warning.state === '已解除' ? 'solved' : 'unsolved']"
             @click="handleWarningClick(warning)"
           >
+            去处理
+          </button>
+        </div>
+      </div>
+
+      <div v-if="warningList.length > 0" v-for="(warning, index) in warningList" :key="'group2-' + (warning.id || index)" class="warning-item">
+        <div class="warning-content">
+          <span class="warning-text">
+            {{ index + 1 }}、连接器{{ warning.deviceNo ?? '未知' }}，{{ warning.info }}，时间：{{ formatTime(warning.createTime) }}
+          </span>
+          <button :class="['handle-btn', warning.state === '已解除' ? 'solved' : 'unsolved']" @click="handleWarningClick(warning)">
             去处理
           </button>
         </div>
@@ -111,7 +122,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { getWarningList, getWarningListForWeek, handleWarning } from '../../api/api'
 import { initWebSocket, getWebSocketClient } from '../../utils/websocket'
 import * as XLSX from 'xlsx'
@@ -183,31 +194,21 @@ const confirmDateRange = () => {
 
 // 自动滚动
 const startScroll = () => {
-  if (!scrollContainer.value) return
+  if (scrollTimer) clearInterval(scrollTimer)
   
   scrollTimer = setInterval(() => {
-    if (!isPaused && scrollContainer.value) {
+    const container = scrollContainer.value
+    if (!isPaused && container && warningList.value.length > 0) {
       scrollPosition += 1
-      scrollContainer.value.scrollTop = scrollPosition
-      
-      // 计算原始列表的高度（不含复制的部分）
-      const scrollHeight = scrollContainer.value.scrollHeight
-      const originalHeight = scrollHeight / 2
-      
-      // 当接近底部时开始准备无缝过渡
-      if (scrollPosition >= originalHeight - 50) {
-        // 到达底部时平滑跳回顶部（而非瞬间跳转）
-        if (scrollPosition >= originalHeight) {
-          scrollPosition = 0
-          // 使用平滑滚动
-          scrollContainer.value.scrollTo({
-            top: 0,
-            behavior: 'smooth'
-          })
-        }
+      // 当滚动到一半高度（第一组数据完全消失时），瞬间重置到 0
+      const halfHeight = container.scrollHeight / 2
+      if (scrollPosition >= halfHeight) {
+        scrollPosition = 0
       }
+      
+      container.scrollTop = scrollPosition
     }
-  }, 50) // 每40ms滚动1px
+  }, 50)
 }
 
 // 暂停滚动
@@ -223,42 +224,20 @@ const resumeScroll = () => {
 // 加载报警列表
 const loadWarningList = async () => {
   try {
-    // 直接请求所有报警信息（不限制state参数）
     const res = await getWarningList({})
-    let allWarnings = []
-    if (res.data && Array.isArray(res.data)) {
-      allWarnings = res.data
-    } else if (res.data && res.data.data && Array.isArray(res.data.data)) {
-      allWarnings = res.data.data
-    }
+    let allWarnings = res.data?.data || res.data || []
     
-    // 只显示state为未解决的数据
-    warningList.value = allWarnings.filter(warning => {
-      return warning.state !== '已解除' && warning.state !== '已解决'
-    })
+    // 只显示未处理数据
+    warningList.value = allWarnings.filter(w => w.state !== '已解除' && w.state !== '已解决')
     
-    console.log('加载的未解决报警信息数量:', warningList.value.length)
+    // 数据加载后，重置滚动位置以防溢出
+    scrollPosition = 0
+    if (scrollContainer.value) scrollContainer.value.scrollTop = 0
   } catch (error) {
     console.error('加载报警列表失败:', error)
-    // 重试时同样请求所有数据
-    try {
-      const allRes = await getWarningList({})
-      let allWarnings = []
-      if (allRes.data && Array.isArray(allRes.data)) {
-        allWarnings = allRes.data
-      } else if (allRes.data && allRes.data.data && Array.isArray(allRes.data.data)) {
-        allWarnings = allRes.data.data
-      }
-      
-      // 只显示state为未解决的数据
-      warningList.value = allWarnings.filter(warning => {
-        return warning.state !== '已解除' && warning.state !== '已解决'
-      })
-    } catch (retryError) {
-      console.error('重试加载报警列表失败:', retryError)
-    }
   }
 }
+
 
 // 处理报警点击
 const handleWarningClick = (warning) => {
@@ -432,32 +411,15 @@ let wsClient = null
 
 // 处理报警信息更新（暴露给父组件调用）
 const handleWarningUpdate = (data) => {
-  console.log('收到报警信息更新:', data)
-  
-  // 如果收到的是单个报警信息
+  // 当新报警进入时，由于 Vue 的双重渲染，它会自动出现在镜像组对应位置
   if (data && data.id) {
-    // 检查是否已存在，存在则更新，不存在则添加（不考虑state）
     const existingIndex = warningList.value.findIndex(item => item.id === data.id)
     if (existingIndex === -1) {
-      warningList.value.unshift(data) // 添加到列表开头
-      console.log('新增报警信息:', data)
+      // 插入到开头，它会同步出现在两个 v-for 的顶部
+      warningList.value.unshift(data)
     } else {
-      warningList.value[existingIndex] = data // 更新现有信息
-      console.log('更新报警信息:', data)
+      warningList.value[existingIndex] = data
     }
-  }
-  // 如果收到的是报警信息数组
-  else if (Array.isArray(data)) {
-    // 合并所有数据，去重（不过滤state）
-    data.forEach(warning => {
-      const existingIndex = warningList.value.findIndex(item => item.id === warning.id)
-      if (existingIndex === -1) {
-        warningList.value.push(warning)
-      } else {
-        warningList.value[existingIndex] = warning
-      }
-    })
-    console.log('批量更新报警信息，当前数量:', warningList.value.length)
   }
 }
 
@@ -571,7 +533,7 @@ onUnmounted(() => {
 
 .warning-list {
   flex: 1;
-  overflow-y: auto;
+  overflow-y: hidden;
   overflow-x: hidden;
   padding: 10px;
   scroll-behavior: smooth;
